@@ -154,7 +154,9 @@ $($case.Path)
             try { & subst ("$substLetter`:") /D | Out-Null } catch {}
         }
         if ($junctionCreated -and (Test-Path -LiteralPath $junction)) {
-            try { Remove-Item -LiteralPath $junction -Force } catch {}
+            # Windows PowerShell 5 may prompt when Remove-Item sees children through a junction.
+            # Directory.Delete removes the junction entry itself without recursively touching its target.
+            try { [System.IO.Directory]::Delete($junction) } catch {}
         }
     }
 
