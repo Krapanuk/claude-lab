@@ -98,7 +98,7 @@ function Invoke-ClaudeLabManagedPolicyTests {
         if ($probeCreatedKey -and (Test-Path -LiteralPath $policyPath)) {
             try { Remove-Item -LiteralPath $policyPath -Force -ErrorAction SilentlyContinue } catch {}
         }
-        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'HKCU managed settings are writable for this local experiment.' -Observed ('HKCU policy key is not writable by the current process: ' + $_.Exception.Message + '. Re-run only this suite from an elevated PowerShell if you explicitly want to test local managed-policy enforcement.'))) 
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'HKCU managed settings are writable for this local experiment.' -Observed ('HKCU policy key is not writable by the current process: ' + $_.Exception.Message + '. Re-run only this suite from an elevated PowerShell if you explicitly want to test local managed-policy enforcement.')))
         return $results
     }
 
