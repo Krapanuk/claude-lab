@@ -35,16 +35,17 @@ function Invoke-ClaudeLabManagedPolicyTests {
     }
     $projectSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $claudeDir 'settings.json') -Encoding UTF8
 
-    # Restrict filesystem settings to the generated project settings. Managed settings still
-    # load independently, which is exactly what this test needs. This keeps normal OAuth login.
     $initArgs = @('--setting-sources','project','--init-only')
 
+    # Positive control: the project hook must work before any managed policy is introduced.
     $baselineRaw = Join-Path $ResultDirectory 'managed-01-baseline.txt'
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
     $baseline = Invoke-ClaudeCaptured -Arguments $initArgs -WorkingDirectory $project -OutputFile $baselineRaw
 
     if (-not (Test-Path -LiteralPath $marker)) {
-        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Baseline project Setup hook should execute before the test policy is applied.' -Observed "Baseline hook did not execute, so the managed-policy oracle cannot be validated. ExitCode=$($baseline.ExitCode)" -Evidence ([string]$baseline.Output).Trim() -RawFile 'managed-01-baseline.txt'))
+        $excerpt = ([string]$baseline.Output).Trim()
+        if ($excerpt.Length -gt 500) { $excerpt = $excerpt.Substring(0,500) + '...' }
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Baseline project Setup hook should execute before the test policy is applied.' -Observed "Baseline hook did not execute, so the managed-policy oracle cannot be validated. ExitCode=$($baseline.ExitCode); Output=$excerpt" -RawFile 'managed-01-baseline.txt'))
         return $results
     }
 
@@ -80,17 +81,35 @@ function Invoke-ClaudeLabManagedPolicyTests {
         } catch {}
     }
 
-    $managedRaw = Join-Path $ResultDirectory 'managed-02-policy-enforced.txt'
+    # Some managed/corporate Windows installations ACL the Policies subtree even under HKCU.
+    # Probe writability with a unique harmless temporary value before touching Settings.
+    $probeName = 'ClaudeLabWriteProbe_' + ([guid]::NewGuid().ToString('N'))
+    $probeCreatedKey = $false
     try {
         if (-not (Test-Path -LiteralPath $policyPath)) {
-            New-Item -Path $policyPath -Force | Out-Null
+            New-Item -Path $policyPath -Force -ErrorAction Stop | Out-Null
+            $probeCreatedKey = $true
         }
+        New-ItemProperty -Path $policyPath -Name $probeName -PropertyType String -Value '1' -Force -ErrorAction Stop | Out-Null
+        Remove-ItemProperty -Path $policyPath -Name $probeName -ErrorAction SilentlyContinue
+    }
+    catch {
+        try { Remove-ItemProperty -Path $policyPath -Name $probeName -ErrorAction SilentlyContinue } catch {}
+        if ($probeCreatedKey -and (Test-Path -LiteralPath $policyPath)) {
+            try { Remove-Item -LiteralPath $policyPath -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'HKCU managed settings are writable for this local experiment.' -Observed ('HKCU policy key is not writable by the current process: ' + $_.Exception.Message + '. Re-run only this suite from an elevated PowerShell if you explicitly want to test local managed-policy enforcement.'))) 
+        return $results
+    }
 
+    $managedRaw = Join-Path $ResultDirectory 'managed-02-policy-enforced.txt'
+    $policyTouched = $false
+    try {
         $policyJson = (@{ allowManagedHooksOnly = $true } | ConvertTo-Json -Compress)
-        New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value $policyJson -Force | Out-Null
+        New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value $policyJson -Force -ErrorAction Stop | Out-Null
+        $policyTouched = $true
 
         Start-Sleep -Milliseconds 300
-
         $run = Invoke-ClaudeCaptured -Arguments $initArgs -WorkingDirectory $project -OutputFile $managedRaw
 
         if (Test-Path -LiteralPath $marker) {
@@ -112,28 +131,33 @@ function Invoke-ClaudeLabManagedPolicyTests {
         $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status $status -Expected 'Project hooks must not load when allowManagedHooksOnly=true is supplied as managed policy.' -Observed $observed -Evidence $evidence -RawFile 'managed-02-policy-enforced.txt'))
     }
     catch {
-        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'ERROR' -Expected 'Project hook blocked by managed policy.' -Observed $_.Exception.Message -RawFile 'managed-02-policy-enforced.txt'))
+        $status = if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access|zugriff.*verweigert|denied') { 'SKIPPED' } else { 'ERROR' }
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status $status -Expected 'Project hook blocked by managed policy.' -Observed $_.Exception.Message -RawFile 'managed-02-policy-enforced.txt'))
     }
     finally {
         Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
 
-        try {
-            if ($settingsOriginallyExisted) {
-                New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value ([string]$originalSettings) -Force | Out-Null
+        if ($policyTouched) {
+            try {
+                if ($settingsOriginallyExisted) {
+                    New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value ([string]$originalSettings) -Force | Out-Null
+                }
+                else {
+                    Remove-ItemProperty -Path $policyPath -Name 'Settings' -ErrorAction SilentlyContinue
+                }
             }
-            elseif (Test-Path -LiteralPath $policyPath) {
-                Remove-ItemProperty -Path $policyPath -Name 'Settings' -ErrorAction SilentlyContinue
+            catch {
+                $results.Add((New-ClaudeLabResult -Suite $suite -Test 'POLICY_RESTORE' -Status 'ERROR' -Expected 'Original HKCU ClaudeCode Settings value restored.' -Observed $_.Exception.Message))
             }
+        }
 
-            if (-not $keyOriginallyExisted -and (Test-Path -LiteralPath $policyPath)) {
+        if (-not $keyOriginallyExisted -and (Test-Path -LiteralPath $policyPath)) {
+            try {
                 $remaining = @(Get-ItemProperty -Path $policyPath | Get-Member -MemberType NoteProperty | Where-Object Name -notmatch '^PS')
                 if ($remaining.Count -eq 0) {
                     Remove-Item -LiteralPath $policyPath -Force -ErrorAction SilentlyContinue
                 }
-            }
-        }
-        catch {
-            $results.Add((New-ClaudeLabResult -Suite $suite -Test 'POLICY_RESTORE' -Status 'ERROR' -Expected 'Original HKCU ClaudeCode policy state restored.' -Observed $_.Exception.Message))
+            } catch {}
         }
     }
 
