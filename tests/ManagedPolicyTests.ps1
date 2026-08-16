@@ -35,20 +35,23 @@ function Invoke-ClaudeLabManagedPolicyTests {
     }
     $projectSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $claudeDir 'settings.json') -Encoding UTF8
 
+    # Restrict filesystem settings to the generated project settings. Managed settings still
+    # load independently, which is exactly what this test needs. This keeps normal OAuth login.
+    $initArgs = @('--setting-sources','project','--init-only')
+
     $baselineRaw = Join-Path $ResultDirectory 'managed-01-baseline.txt'
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
-    $baseline = Invoke-ClaudeCaptured -Arguments @('--init-only') -WorkingDirectory $project -OutputFile $baselineRaw
+    $baseline = Invoke-ClaudeCaptured -Arguments $initArgs -WorkingDirectory $project -OutputFile $baselineRaw
 
     if (-not (Test-Path -LiteralPath $marker)) {
-        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Baseline project Setup hook should execute before policy is applied.' -Observed 'Baseline hook did not execute, so the managed-policy oracle cannot be validated.' -Evidence "ExitCode=$($baseline.ExitCode)" -RawFile 'managed-01-baseline.txt'))
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Baseline project Setup hook should execute before the test policy is applied.' -Observed "Baseline hook did not execute, so the managed-policy oracle cannot be validated. ExitCode=$($baseline.ExitCode)" -Evidence ([string]$baseline.Output).Trim() -RawFile 'managed-01-baseline.txt'))
         return $results
     }
 
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
 
-    # HKCU is the lowest-priority managed policy source. If a higher-priority
-    # machine/file policy exists, Claude Code may ignore HKCU entirely, making
-    # this specific test invalid rather than vulnerable.
+    # HKCU is the lowest-priority managed policy source. If a higher-priority local policy
+    # exists, this specific HKCU experiment is ambiguous and should be skipped.
     $higherPolicyReasons = New-Object System.Collections.Generic.List[string]
     try {
         $hklm = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\ClaudeCode' -Name 'Settings' -ErrorAction Stop
@@ -61,7 +64,7 @@ function Invoke-ClaudeLabManagedPolicyTests {
     if (Test-Path -LiteralPath $managedDropIn) { $higherPolicyReasons.Add($managedDropIn) }
 
     if ($higherPolicyReasons.Count -gt 0) {
-        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Project hook blocked by HKCU managed policy.' -Observed ('Higher-priority managed source detected; HKCU test would be ambiguous: ' + ($higherPolicyReasons -join '; ')) -RawFile 'managed-01-baseline.txt'))
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'ALLOW_MANAGED_HOOKS_ONLY' -Status 'SKIPPED' -Expected 'Project hook blocked by HKCU managed policy.' -Observed ('Higher-priority local managed source detected; HKCU test would be ambiguous: ' + ($higherPolicyReasons -join '; ')) -RawFile 'managed-01-baseline.txt'))
         return $results
     }
 
@@ -72,7 +75,7 @@ function Invoke-ClaudeLabManagedPolicyTests {
 
     if ($keyOriginallyExisted) {
         try {
-            $originalSettings = (Get-ItemProperty -LiteralPath $policyPath -Name 'Settings' -ErrorAction Stop).Settings
+            $originalSettings = (Get-ItemProperty -Path $policyPath -Name 'Settings' -ErrorAction Stop).Settings
             $settingsOriginallyExisted = $true
         } catch {}
     }
@@ -84,21 +87,25 @@ function Invoke-ClaudeLabManagedPolicyTests {
         }
 
         $policyJson = (@{ allowManagedHooksOnly = $true } | ConvertTo-Json -Compress)
-        New-ItemProperty -LiteralPath $policyPath -Name 'Settings' -PropertyType String -Value $policyJson -Force | Out-Null
+        New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value $policyJson -Force | Out-Null
 
-        # Give registry notification/read paths a moment to settle before a new CLI process starts.
         Start-Sleep -Milliseconds 300
 
-        $run = Invoke-ClaudeCaptured -Arguments @('--init-only') -WorkingDirectory $project -OutputFile $managedRaw
+        $run = Invoke-ClaudeCaptured -Arguments $initArgs -WorkingDirectory $project -OutputFile $managedRaw
 
         if (Test-Path -LiteralPath $marker) {
             $status = 'SECURITY_FAIL'
             $observed = 'Project-controlled Setup hook executed even though HKCU managed settings set allowManagedHooksOnly=true.'
             $evidence = "Marker=$marker; ExitCode=$($run.ExitCode); Policy=$policyJson"
         }
+        elseif ($run.ExitCode -ne 0) {
+            $status = 'INCONCLUSIVE'
+            $observed = "Marker was blocked, but Claude exited non-zero. Confirm that the managed policy was actually loaded before treating this as PASS. ExitCode=$($run.ExitCode)"
+            $evidence = "Policy=$policyJson; Output=$(([string]$run.Output).Trim())"
+        }
         else {
             $status = 'PASS'
-            $observed = 'Project Setup hook was blocked after allowManagedHooksOnly=true was applied as managed policy.'
+            $observed = 'Project Setup hook executed in baseline and was blocked after allowManagedHooksOnly=true was applied as HKCU managed policy.'
             $evidence = "ExitCode=$($run.ExitCode); Policy=$policyJson"
         }
 
@@ -112,14 +119,14 @@ function Invoke-ClaudeLabManagedPolicyTests {
 
         try {
             if ($settingsOriginallyExisted) {
-                New-ItemProperty -LiteralPath $policyPath -Name 'Settings' -PropertyType String -Value ([string]$originalSettings) -Force | Out-Null
+                New-ItemProperty -Path $policyPath -Name 'Settings' -PropertyType String -Value ([string]$originalSettings) -Force | Out-Null
             }
             elseif (Test-Path -LiteralPath $policyPath) {
-                Remove-ItemProperty -LiteralPath $policyPath -Name 'Settings' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $policyPath -Name 'Settings' -ErrorAction SilentlyContinue
             }
 
             if (-not $keyOriginallyExisted -and (Test-Path -LiteralPath $policyPath)) {
-                $remaining = @(Get-ItemProperty -LiteralPath $policyPath | Get-Member -MemberType NoteProperty | Where-Object Name -notmatch '^PS')
+                $remaining = @(Get-ItemProperty -Path $policyPath | Get-Member -MemberType NoteProperty | Where-Object Name -notmatch '^PS')
                 if ($remaining.Count -eq 0) {
                     Remove-Item -LiteralPath $policyPath -Force -ErrorAction SilentlyContinue
                 }
