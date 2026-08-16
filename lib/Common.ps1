@@ -32,7 +32,7 @@ function New-ClaudeLabResult {
 function Convert-ToClaudeAbsoluteRulePath {
     param([Parameter(Mandatory)][string]$Path)
 
-    $full = [System.IO.Path]::GetFullPath($Path).Replace('\\','/')
+    $full = [System.IO.Path]::GetFullPath($Path).Replace([char]92, [char]47)
     if ($full -match '^([A-Za-z]):/(.*)$') {
         return ('//{0}/{1}' -f $Matches[1].ToLowerInvariant(), $Matches[2])
     }
