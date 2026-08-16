@@ -17,7 +17,18 @@ $resultDirectory = Join-Path $repoRoot ("results\$stamp")
 $labRoot = Join-Path $env:TEMP ("claude-lab-$stamp-" + ([guid]::NewGuid().ToString('N').Substring(0,8)))
 New-Item -ItemType Directory -Force -Path $resultDirectory,$labRoot | Out-Null
 
-$results = New-Object System.Collections.Generic.List[object]
+# Use a native PowerShell array for compatibility with Windows PowerShell 5.1.
+$results = @()
+
+function Add-AndPrintResult {
+    param([Parameter(Mandatory)]$Result)
+    $script:results += $Result
+    Write-Host ("  {0,-24} {1}" -f $Result.Test, $Result.Status)
+    if ($Result.Status -in @('ERROR','INCONCLUSIVE','SECURITY_FAIL')) {
+        Write-Host ("    -> {0}" -f $Result.Observed) -ForegroundColor Yellow
+        if ($Result.RawFile) { Write-Host ("    raw: {0}" -f (Join-Path $script:resultDirectory $Result.RawFile)) }
+    }
+}
 
 try {
     $claude = Get-ClaudeExecutable
@@ -35,13 +46,11 @@ try {
         Write-Host '[1/2] Windows path / Read deny tests...' -ForegroundColor Cyan
         try {
             foreach ($r in @(Invoke-ClaudeLabPathTests -LabRoot $labRoot -ResultDirectory $resultDirectory)) {
-                $results.Add($r)
-                Write-Host ("  {0,-24} {1}" -f $r.Test, $r.Status)
+                Add-AndPrintResult -Result $r
             }
         }
         catch {
-            $results.Add((New-ClaudeLabResult -Suite 'WindowsPathDenyRead' -Test 'SUITE' -Status 'ERROR' -Expected 'Path suite completes.' -Observed $_.Exception.Message))
-            Write-Warning $_.Exception.Message
+            Add-AndPrintResult -Result (New-ClaudeLabResult -Suite 'WindowsPathDenyRead' -Test 'SUITE' -Status 'ERROR' -Expected 'Path suite completes.' -Observed $_.Exception.Message)
         }
     }
 
@@ -50,13 +59,11 @@ try {
         Write-Host '[2/2] Managed policy / project hook test...' -ForegroundColor Cyan
         try {
             foreach ($r in @(Invoke-ClaudeLabManagedPolicyTests -LabRoot $labRoot -ResultDirectory $resultDirectory)) {
-                $results.Add($r)
-                Write-Host ("  {0,-24} {1}" -f $r.Test, $r.Status)
+                Add-AndPrintResult -Result $r
             }
         }
         catch {
-            $results.Add((New-ClaudeLabResult -Suite 'ManagedPolicy' -Test 'SUITE' -Status 'ERROR' -Expected 'Managed policy suite completes.' -Observed $_.Exception.Message))
-            Write-Warning $_.Exception.Message
+            Add-AndPrintResult -Result (New-ClaudeLabResult -Suite 'ManagedPolicy' -Test 'SUITE' -Status 'ERROR' -Expected 'Managed policy suite completes.' -Observed $_.Exception.Message)
         }
     }
 
@@ -67,7 +74,7 @@ try {
         PowerShellVersion = $psVersion
         LabRoot = $labRoot
     }
-    Write-ClaudeLabReports -Results @($results) -ResultDirectory $resultDirectory -Metadata $metadata
+    Write-ClaudeLabReports -Results $results -ResultDirectory $resultDirectory -Metadata $metadata
 
     $failures = @($results | Where-Object Status -eq 'SECURITY_FAIL')
     $errors = @($results | Where-Object Status -eq 'ERROR')
