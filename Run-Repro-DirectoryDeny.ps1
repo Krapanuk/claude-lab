@@ -58,13 +58,10 @@ $PresentedPath
             $args += @('--setting-sources','project','--settings',$SettingsPath)
         }
         'PROJECT_ONLY' {
-            # Load the real .claude/settings.json from the generated project, while
-            # excluding user/local settings that could make the experiment ambiguous.
             $args += @('--setting-sources','project')
         }
         'DEFAULT_SOURCES' {
-            # Deliberately add no --settings and no --setting-sources. This is the
-            # ordinary claude -p settings-resolution path a normal user gets.
+            # Ordinary settings resolution: no --settings and no --setting-sources.
         }
     }
 
@@ -121,8 +118,6 @@ try {
             ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $directorySettings -Encoding UTF8
 
         $projectSettingsPath = Join-Path $claudeDir 'settings.json'
-        @{ permissions = @{ deny = @($directoryRule) } } |
-            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $projectSettingsPath -Encoding UTF8
 
         $slash = [char]92
         $cases = @(
@@ -134,31 +129,34 @@ try {
         Write-Host "Round $round" -ForegroundColor Cyan
         Write-Host "  Rule: $directoryRule"
 
-        # Positive controls: every spelling must be able to read the same random canary
-        # before we interpret any deny result.
+        # The .claude directory exists but settings.json deliberately does NOT exist yet.
+        # This keeps the baseline and explicit --settings control independent.
         foreach ($case in $cases) {
             $r = Invoke-DirectoryReproRead -Round $round -Policy 'BASELINE' -Case $case.Name -PresentedPath $case.Path -WorkingDirectory $project -SettingsPath $baselineSettings -Token $token -SourceMode 'CLI_SETTINGS'
             $all += $r
             Write-Host ("  {0,-22} {1,-15} {2,-18} {3}" -f 'BASELINE','CLI_SETTINGS',$case.Name,$r.Verdict)
         }
 
-        # Control 1: explicit --settings containing a realistic directory deny.
+        # Realistic directory deny supplied through --settings.
         foreach ($case in $cases) {
             $r = Invoke-DirectoryReproRead -Round $round -Policy 'DENY_DIRECTORY' -Case $case.Name -PresentedPath $case.Path -WorkingDirectory $project -SettingsPath $directorySettings -Token $token -SourceMode 'CLI_SETTINGS'
             $all += $r
             Write-Host ("  {0,-22} {1,-15} {2,-18} {3}" -f 'DENY_DIRECTORY','CLI_SETTINGS',$case.Name,$r.Verdict)
         }
 
-        # Control 2: the same deny lives in the ordinary project file .claude/settings.json;
-        # no --settings argument is supplied.
+        # Only now create the actual project settings file, so the following controls prove
+        # the same deny through the normal .claude/settings.json carrier.
+        @{ permissions = @{ deny = @($directoryRule) } } |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $projectSettingsPath -Encoding UTF8
+
         foreach ($case in $cases) {
             $r = Invoke-DirectoryReproRead -Round $round -Policy 'DENY_PROJECT' -Case $case.Name -PresentedPath $case.Path -WorkingDirectory $project -Token $token -SourceMode 'PROJECT_ONLY'
             $all += $r
             Write-Host ("  {0,-22} {1,-15} {2,-18} {3}" -f 'DENY_PROJECT','PROJECT_ONLY',$case.Name,$r.Verdict)
         }
 
-        # Control 3: same .claude/settings.json, but now with ordinary settings resolution.
-        # This is intentionally closest to a normal `claude -p` invocation.
+        # Closest to an ordinary user's `claude -p`: the deny is still only in
+        # .claude/settings.json, and default settings resolution is used.
         foreach ($case in $cases) {
             $r = Invoke-DirectoryReproRead -Round $round -Policy 'DENY_PROJECT_DEFAULT' -Case $case.Name -PresentedPath $case.Path -WorkingDirectory $project -Token $token -SourceMode 'DEFAULT_SOURCES'
             $all += $r
@@ -182,18 +180,23 @@ try {
     })
 
     $projectCandidates = @($candidate | Where-Object { $_.Policy -like 'DENY_PROJECT*' })
+    $defaultCandidates = @($candidate | Where-Object { $_.Policy -eq 'DENY_PROJECT_DEFAULT' })
 
     Write-Host 'Summary' -ForegroundColor Cyan
     Write-Host ("  Candidate directory-deny alias bypasses: {0}" -f $candidate.Count)
-    Write-Host ("  Of which via .claude/settings.json:       {0}" -f $projectCandidates.Count)
+    Write-Host ("  Via .claude/settings.json:                {0}" -f $projectCandidates.Count)
+    Write-Host ("  Via default settings resolution:          {0}" -f $defaultCandidates.Count)
     Write-Host ("  Failed controls:                          {0}" -f $controlsBad.Count)
     Write-Host "  Evidence directory: $resultDirectory"
 
-    if ($projectCandidates.Count -gt 0 -and $controlsBad.Count -eq 0) {
-        Write-Host '  RESULT: directory deny bypass reproduced through normal project settings.' -ForegroundColor Yellow
+    if ($defaultCandidates.Count -gt 0 -and $controlsBad.Count -eq 0) {
+        Write-Host '  RESULT: directory deny bypass reproduced with ordinary project settings and default settings resolution.' -ForegroundColor Yellow
+    }
+    elseif ($projectCandidates.Count -gt 0 -and $controlsBad.Count -eq 0) {
+        Write-Host '  RESULT: directory deny bypass reproduced through .claude/settings.json.' -ForegroundColor Yellow
     }
     elseif ($candidate.Count -gt 0 -and $controlsBad.Count -eq 0) {
-        Write-Host '  RESULT: directory deny bypass reproduced, but not through project-settings controls.' -ForegroundColor Yellow
+        Write-Host '  RESULT: directory deny bypass reproduced only through explicit --settings.' -ForegroundColor Yellow
     }
     elseif ($controlsBad.Count -gt 0) {
         Write-Host '  RESULT: inconclusive because one or more controls failed.' -ForegroundColor Yellow
