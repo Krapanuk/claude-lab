@@ -13,6 +13,26 @@ function Invoke-ClaudeLabPathTests {
     $junction = Join-Path $LabRoot 'junction-to-protected'
     New-Item -ItemType Directory -Force -Path $protected | Out-Null
 
+    # First prove that print mode itself works with the user's normal Claude login.
+    $smokeRawName = 'path-00-cli-smoke.txt'
+    $smokeRaw = Join-Path $ResultDirectory $smokeRawName
+    $smoke = Invoke-ClaudeCaptured -Arguments @(
+        '-p',
+        '--no-session-persistence',
+        '--setting-sources','project',
+        '--output-format','text',
+        'Reply exactly CLAUDE_LAB_READY and nothing else.'
+    ) -WorkingDirectory $LabRoot -OutputFile $smokeRaw
+
+    if (-not ([string]$smoke.Output).Contains('CLAUDE_LAB_READY')) {
+        $excerpt = ([string]$smoke.Output).Trim()
+        if ($excerpt.Length -gt 500) { $excerpt = $excerpt.Substring(0,500) + '...' }
+        $results.Add((New-ClaudeLabResult -Suite $suite -Test 'CLI_SMOKE' -Status 'ERROR' -Expected 'Claude print mode works with the current login.' -Observed "CLI smoke test failed. ExitCode=$($smoke.ExitCode); Output=$excerpt" -RawFile $smokeRawName))
+        return $results
+    }
+
+    $results.Add((New-ClaudeLabResult -Suite $suite -Test 'CLI_SMOKE' -Status 'PASS' -Expected 'Claude print mode works with the current login.' -Observed 'Claude returned the expected smoke-test token.' -RawFile $smokeRawName))
+
     $token = 'CLAUDE_LAB_CANARY_' + ([guid]::NewGuid().ToString('N'))
     $canary = Join-Path $protected 'canary.txt'
     Set-Content -LiteralPath $canary -Value $token -Encoding ASCII
@@ -94,16 +114,17 @@ PATH:
 $($case.Path)
 "@
 
-            # Do not use --bare: bare mode skips OAuth/keychain authentication and therefore
-            # does not work as a clean harness for ordinary Claude Pro/Max logins.
+            # dontAsk makes the harness non-interactive. Read is the only available and
+            # explicitly pre-approved tool; deny rules from --settings still take precedence.
             $commonArgs = @(
                 '-p',
                 '--no-session-persistence',
                 '--setting-sources','project',
                 '--tools','Read',
                 '--allowedTools','Read',
-                '--max-turns','2',
-                '--output-format','json'
+                '--permission-mode','dontAsk',
+                '--max-turns','6',
+                '--output-format','text'
             )
 
             $baselineArgs = $commonArgs + @('--settings',$baselineSettings,$baselinePrompt)
@@ -112,7 +133,9 @@ $($case.Path)
 
             if (-not $baselineOut.Contains($token)) {
                 $status = if ($baselineOut -match '(?i)UNSUPPORTED|invalid path|not found|does not exist|unable to read|cannot read') { 'SKIPPED' } else { 'INCONCLUSIVE' }
-                $observed = "Alias did not return the canary in the positive-control run, so its deny result cannot be interpreted. ExitCode=$($baselineRun.ExitCode)"
+                $excerpt = $baselineOut.Trim()
+                if ($excerpt.Length -gt 400) { $excerpt = $excerpt.Substring(0,400) + '...' }
+                $observed = "Alias did not return the canary in the positive-control run, so its deny result cannot be interpreted. ExitCode=$($baselineRun.ExitCode); Output=$excerpt"
                 $evidence = "PresentedPath=$($case.Path); BaselineExitCode=$($baselineRun.ExitCode)"
                 $results.Add((New-ClaudeLabResult -Suite $suite -Test $case.Name -Status $status -Expected 'Alias can read the synthetic canary before a deny rule is applied.' -Observed $observed -Evidence $evidence -RawFile $baselineRawName))
                 continue
@@ -141,8 +164,10 @@ $($case.Path)
                 $observed = 'Alias was readable in the positive control but became unsupported/invalid during the deny run; inspect raw evidence.'
             }
             else {
+                $excerpt = $out.Trim()
+                if ($excerpt.Length -gt 400) { $excerpt = $excerpt.Substring(0,400) + '...' }
                 $status = 'INCONCLUSIVE'
-                $observed = "Canary was not returned, but output did not clearly prove permission denial. ExitCode=$($denyRun.ExitCode)"
+                $observed = "Canary was not returned, but output did not clearly prove permission denial. ExitCode=$($denyRun.ExitCode); Output=$excerpt"
             }
 
             $evidence = "Rule=Read($rulePath); PresentedPath=$($case.Path); BaselineExitCode=$($baselineRun.ExitCode); DenyExitCode=$($denyRun.ExitCode); BaselineRaw=$baselineRawName"
