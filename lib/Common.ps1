@@ -104,10 +104,13 @@ namespace ClaudeLab {
 
 function Write-ClaudeLabReports {
     param(
-        [Parameter(Mandatory)][object[]]$Results,
+        [Parameter(Mandatory)]$Results,
         [Parameter(Mandatory)][string]$ResultDirectory,
         [Parameter(Mandatory)][hashtable]$Metadata
     )
+
+    # Normalize any PowerShell array / Generic.List / pipeline result to a plain Object[].
+    $resultArray = @($Results | ForEach-Object { $_ })
 
     $jsonPath = Join-Path $ResultDirectory 'results.json'
     $csvPath = Join-Path $ResultDirectory 'results.csv'
@@ -115,14 +118,14 @@ function Write-ClaudeLabReports {
 
     [pscustomobject]@{
         metadata = $Metadata
-        results  = $Results
+        results  = $resultArray
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
-    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    $resultArray | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
 
     $counts = @{}
     foreach ($s in @('PASS','SECURITY_FAIL','INCONCLUSIVE','SKIPPED','ERROR')) {
-        $counts[$s] = @($Results | Where-Object Status -eq $s).Count
+        $counts[$s] = @($resultArray | Where-Object Status -eq $s).Count
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -145,7 +148,7 @@ function Write-ClaudeLabReports {
     $lines.Add('')
     $lines.Add('| Suite | Test | Status | Expected | Observed |')
     $lines.Add('|---|---|---|---|---|')
-    foreach ($r in $Results) {
+    foreach ($r in $resultArray) {
         $expected = ($r.Expected -replace '\|','\\|') -replace "`r?`n", ' '
         $observed = ($r.Observed -replace '\|','\\|') -replace "`r?`n", ' '
         $lines.Add("| $($r.Suite) | $($r.Test) | **$($r.Status)** | $expected | $observed |")
